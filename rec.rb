@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 Dir.chdir __dir__
 require 'pp'
+require 'digest/sha1'
 require 'yaml'
 require 'time'
 require 'bundler/setup'
@@ -115,7 +116,7 @@ radio = Radio.new(radio_id)
 content = radio.content
 description = radio.description
 
-flv_path = File.join(target_dir,"#{radio.channel_id}-#{radio.contents_id}.flv")
+flv_path = File.join(target_dir,"#{radio.channel_id}-#{Digest::SHA1.hexdigest(radio.content.playpath)}.flv")
 mp3_path = flv_path.sub(/\.flv$/, '.mp3')
 
 exit if File.exist?(flv_path) && File.exist?(mp3_path)
