@@ -8,88 +8,11 @@ require 'bundler/setup'
 require 'uri'
 require 'open-uri'
 require 'nokogiri'
+require 'json'
 
-class Radio
-  def initialize(radio_id)
-    html = open("http://hibiki-radio.jp/?radio_id=#{radio_id}", &:read)
-    m = html.match(/channelID:"(.+?)",contentsID:"(.+?)"/)
-    raise RuntimeError, 'no channel_id contents_id' unless m
-
-    @channel_id = m[1]
-    @contents_id = m[2]
-  end
-
-  attr_reader :channel_id, :contents_id
-
-  def description
-    @description ||= Description.new(channel_id)
-  end
-
-  def content
-    @content ||= Content.new(channel_id, contents_id)
-  end
-
-  class Description
-    def initialize(channel_id)
-      url = "http://image.hibiki-radio.jp/uploads/data/channel/#{channel_id}/description.xml"
-      @xml = Nokogiri::XML(open(url, &:read))
-    end
-
-    def casts
-      @xml.search('data cast name').map(&:inner_text)
-    end
-
-    def title
-      @xml.at('data title').inner_text
-    end
-
-    def outline
-      @xml.at('data outline').inner_text
-    end
-
-    def link
-      @xml.at('data link').inner_text
-    end
-  end
-
-  class Content
-    def initialize(channel_id, contents_id)
-      url = "http://image.hibiki-radio.jp/uploads/data/channel/#{channel_id}/#{contents_id}.xml"
-      @xml = Nokogiri::XML(open(url, &:read))
-    end
-
-    def flv
-      @xml.at('flv').inner_text.split(/\?/,2)
-    end
-
-    def dir
-      @xml.at('dir').inner_text
-    end
-
-    def protocol
-      @xml.at('protocol').inner_text
-    end
-
-    def domain
-      @xml.at('domain').inner_text
-    end
-
-    def playpath
-      flv[0]
-    end
-
-    def query
-      flv[1]
-    end
-
-    def app
-      "#{dir}?#{query}"
-    end
-
-    def rtmp
-      "#{protocol}://#{domain}"
-    end
-  end
+def api(url)
+  json = open(url, 'User-Agent' => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/48.0.2564.82 Safari/537.36', 'Origin' => 'http://hibiki-radio.jp', 'Referer' => 'http://hibiki-radio.jp/', 'X-Requested-With' => 'XMLHttpRequest', &:read)
+  JSON.parse(json)
 end
 
 config_path = "#{__dir__}/config.yml"
@@ -112,65 +35,47 @@ Dir.mkdir(target_dir) unless File.exists?(target_dir)
 
 rss_path = File.join(target_dir, 'index.xml')
 
-radio = Radio.new(radio_id)
-content = radio.content
-description = radio.description
+program = api("https://vcms-api.hibiki-radio.jp/api/v1/programs/#{radio_id}")
+episode = program['episode']
 
-flv_path = File.join(target_dir,"#{radio.channel_id}-#{Digest::SHA1.hexdigest(radio.content.playpath)}.flv")
-mp3_path = flv_path.sub(/\.flv$/, '.mp3')
+if episode['video']['live_flg'] != false
+  $stderr.puts "live_flg is not false"
+  exit 1
+end
 
-exit if File.exist?(flv_path) && File.exist?(mp3_path)
+description = program['description']
+
+mp4_path =  File.join(target_dir,"#{radio_id}-v2-#{episode['id']}.mp4")
+mp3_path =  File.join(target_dir,"#{radio_id}-v2-#{episode['id']}.mp3")
+
+exit if File.exist?(mp4_path) && File.exist?(mp3_path)
+
+m3u8 = api("https://vcms-api.hibiki-radio.jp/api/v1/videos/play_check?video_id=#{episode['video']['id']}")['playlist_url']
 
 cmd = [
-  'rtmpdump',
-  '-o', flv_path,
-  '--rtmp', content.rtmp,
-  '--app', content.app,
-  '--playpath', content.playpath,
+  'ffmpeg',
+  '-y',
+  '-i', m3u8,
+  *%w(-vcodec copy -acodec copy -bsf:a aac_adtstoasc) ,
+  mp4_path,
 ].map(&:to_s)
+
+status = system(*cmd)
+if status
+  puts "  * Done!"
+  mp3_path
+else
+  puts "  * Failed ;("
+  nil
+end
+
+
 
 puts "==> #{cmd.join(' ')}"
 status = nil
 out = ""
 
-IO.popen([*cmd, err: [:child, :out]], 'r') do |io|
-  th = Thread.new {
-    begin
-      buf = ""
-      until io.eof?
-        str =  io.read(10)
-        buf << str; out << str
-        lines = buf.split(/\r|\n/)
-        if 1 < lines.size
-          buf = lines.pop
-          lines.each do |line|
-            puts line
-          end
-        end
-      end
-    rescue Exception => e
-      p e
-      puts e.backtrace
-    end
-  }
-
-  pid, status = Process.waitpid(io.pid)
-
-  th.kill if th && th.alive?
-end
-
-if status && !status.success?
-  puts "  * May be fail"
-elsif /^Download may be incomplete/ === out
-  puts "  * Download may be incomplete"
-else
-  puts "  * Done!"
-end
-
-
-
-
-cmd = ["ffmpeg", "-i", flv_path, "-b:a", "96k", mp3_path]
+cmd = ["ffmpeg", "-i", mp4_path, "-vcodec", "none", "-b:a", "96k", mp3_path]
 puts "==> #{cmd.join(' ')}"
 
 status = system(*cmd)
@@ -189,19 +94,19 @@ pubdate = Time.now
 builder = Nokogiri::XML::Builder.new do |xml|
   xml.rss('xmlns:itunes' => "http://www.itunes.com/dtds/podcast-1.0.dtd", version: '2.0') {
     xml.channel {
-      casts = radio.description.casts.join(', ')
+      casts = program['cast']
 
-      xml.title radio.description.title.gsub(/<.+?>/, ' ')
-      xml.description radio.description.outline.gsub(/<.+?>/,'')
-      xml.link radio.description.link
+      xml.title program['name'].gsub(/<.+?>/, ' ')
+      xml.description program['description'].gsub(/<.+?>/,'')
+      xml.link "http://hibiki-radio.jp/description/#{radio_id}"
       xml['itunes'].author casts
 
       xml.lastBuildDate Time.now.rfc2822
       xml.language 'ja'
 
       xml.item {
-        xml.title "#{pubdate.strftime("%Y/%m/%d %H:%M")} #{radio.description.title} - #{casts}"
-        xml.description radio.description.outline.gsub(/<.+?>/,'')
+        xml.title "#{pubdate.strftime("%Y/%m/%d %H:%M")} #{program['name']} - #{casts}"
+        xml.description program['description'].gsub(/<.+?>/,'')
         link = "#{HTTP_BASE}/#{name}/#{File.basename(mp3_path)}"
         xml.link link
         xml.guid link

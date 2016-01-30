@@ -4,32 +4,32 @@ require 'pp'
 require 'yaml'
 require 'bundler/setup'
 require 'open-uri'
-require 'nokogiri'
+require 'json'
 
-mokuji = Nokogiri::HTML(open('http://hibiki-radio.jp/mokuji', &:read))
+def api(url)
+  json = open(url, 'User-Agent' => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/48.0.2564.82 Safari/537.36', 'Origin' => 'http://hibiki-radio.jp', 'Referer' => 'http://hibiki-radio.jp/', 'X-Requested-With' => 'XMLHttpRequest', &:read)
+  JSON.parse(json)
+end
 
-programs = mokuji.search('.hbkMokujiTable .hbkMokujiLink2 > a').map {|_| [_.inner_text, _['href']] }
+programs = []
 
-worked_memo = {} # remove repeats
+page = 1
+loop do
+  res = api("https://vcms-api.hibiki-radio.jp/api/v1//programs?limit=8&page=#{page}")
+  break if res.size != 8
 
-programs.each do |(program_title, program_url)|
-  program_html = Nokogiri::HTML(open(program_url, &:read))
-  listen_btn_href = program_html.at('a#hbkListenBtn')['href']
-  m = listen_btn_href.match(/[?&;]radio_id=(.+?)(?:\z|[&;])/)
-  raise unless m
-
-  program_id = m[1]
-  if worked_memo[program_id]
-    puts "# skipping #{program_url} #{program_title} (#{program_id})"
-    next
+  res.each do |x|
+    programs << x['access_id']
   end
+  page += 1
+end
 
-  program_name = program_url.sub(/\A.*\/description\//, '').gsub(/\//,'_')
+p programs
+puts "----"
 
-  worked_memo[program_id] = true
-
-  puts "$ ./rec.rb #{program_name} #{program_id}"
-  p(system("./rec.rb", program_name, program_id))
+programs.each do |program|
+  puts "$ ./rec.rb #{program} #{program}"
+  p(system("./rec.rb", program, program))
 
   sleep 1
 end
